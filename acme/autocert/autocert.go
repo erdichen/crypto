@@ -92,6 +92,11 @@ func defaultHostPolicy(context.Context, string) error {
 	return nil
 }
 
+type dnsManager interface {
+	Add(ctx context.Context, fqdn, txt string) error
+	Remove(ctx context.Context, fqdn string) error
+}
+
 // Manager is a stateful certificate manager built on top of acme.Client.
 // It obtains and refreshes certificates automatically using "tls-alpn-01"
 // or "http-01" challenge types, as well as providing them to a TLS server
@@ -174,6 +179,9 @@ type Manager struct {
 	// account of the CA to which the ACME server is tied.
 	// See RFC 8555, Section 7.3.4 for more details.
 	ExternalAccountBinding *acme.ExternalAccountBinding
+
+	// DNSManager services DNS requests for "dns-01" challenges.
+	DNSManager dnsManager
 
 	clientMu sync.Mutex
 	client   *acme.Client // initialized by acmeClient method
@@ -773,7 +781,7 @@ func pickChallenge(typ string, chal []*acme.Challenge) *acme.Challenge {
 func (m *Manager) supportedChallengeTypes() []string {
 	m.challengeMu.RLock()
 	defer m.challengeMu.RUnlock()
-	typ := []string{"tls-alpn-01"}
+	typ := []string{"dns-01", "tls-alpn-01"}
 	if m.tryHTTP01 {
 		typ = append(typ, "http-01")
 	}
@@ -806,6 +814,19 @@ func (m *Manager) deactivatePendingAuthz(uri []string) {
 // The cleanup is non-nil only if provisioning succeeded.
 func (m *Manager) fulfill(ctx context.Context, client *acme.Client, chal *acme.Challenge, domain string) (cleanup func(), err error) {
 	switch chal.Type {
+	case "dns-01":
+		if m.DNSManager == nil {
+			return nil, fmt.Errorf("acme/autocert: valid DNSManager required for challenge type %q", chal.Type)
+		}
+		rec, err := client.DNS01ChallengeRecord(chal.Token)
+		if err != nil {
+			return nil, err
+		}
+		dnsName := "_acme-challenge." + domain + "."
+		if err := m.DNSManager.Add(ctx, dnsName, rec); err != nil {
+			return nil, err
+		}
+		return func() { m.DNSManager.Remove(ctx, dnsName) }, nil
 	case "tls-alpn-01":
 		cert, err := client.TLSALPN01ChallengeCert(chal.Token, domain)
 		if err != nil {
