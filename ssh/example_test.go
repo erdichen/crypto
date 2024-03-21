@@ -16,6 +16,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 
 	"golang.org/x/crypto/ssh"
 	"golang.org/x/crypto/ssh/terminal"
@@ -98,8 +99,15 @@ func ExampleNewServerConn() {
 	}
 	log.Printf("logged in with key %s", conn.Permissions.Extensions["pubkey-fp"])
 
+	var wg sync.WaitGroup
+	defer wg.Wait()
+
 	// The incoming Request channel must be serviced.
-	go ssh.DiscardRequests(reqs)
+	wg.Add(1)
+	go func() {
+		ssh.DiscardRequests(reqs)
+		wg.Done()
+	}()
 
 	// Service the incoming Channel channel.
 	for newChannel := range chans {
@@ -119,16 +127,22 @@ func ExampleNewServerConn() {
 		// Sessions have out-of-band requests such as "shell",
 		// "pty-req" and "env".  Here we handle only the
 		// "shell" request.
+		wg.Add(1)
 		go func(in <-chan *ssh.Request) {
 			for req := range in {
 				req.Reply(req.Type == "shell", nil)
 			}
+			wg.Done()
 		}(requests)
 
 		term := terminal.NewTerminal(channel, "> ")
 
+		wg.Add(1)
 		go func() {
-			defer channel.Close()
+			defer func() {
+				channel.Close()
+				wg.Done()
+			}()
 			for {
 				line, err := term.ReadLine()
 				if err != nil {
@@ -370,7 +384,7 @@ func ExampleCertificate_SignCert() {
 	}
 	mas, err := ssh.NewSignerWithAlgorithms(signer.(ssh.AlgorithmSigner), []string{ssh.KeyAlgoRSASHA256})
 	if err != nil {
-		log.Fatal("unable to create signer with algoritms: ", err)
+		log.Fatal("unable to create signer with algorithms: ", err)
 	}
 	certificate := ssh.Certificate{
 		Key:      publicKey,
